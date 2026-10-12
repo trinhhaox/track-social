@@ -37,7 +37,7 @@ export function LeaderboardPage({ config, ranked, totals, updatedAt }: Leaderboa
 
       <section class="card">
         <h2>Bảng xếp hạng</h2>
-        <p class="muted small">Điểm = {formula}</p>
+        <p class="muted small">Điểm = {formula}. Mỗi người chỉ có 1 chỗ trên bảng, tính bài có điểm cao nhất.</p>
         <div class="scroll">
           <table>
             <thead>

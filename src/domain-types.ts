@@ -40,6 +40,8 @@ export interface StoredPost {
   comments: number;
   shares: number;
   comments_fetched_count: number;
+  /** Consecutive refreshes in which the scraper returned nothing for this post. */
+  refresh_misses: number;
   hidden: number;
   ai_summary: string | null;
   ai_topic: string | null;

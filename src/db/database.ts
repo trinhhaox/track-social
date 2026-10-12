@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS posts (
   comments INTEGER NOT NULL DEFAULT 0,
   shares INTEGER NOT NULL DEFAULT 0,
   comments_fetched_count INTEGER NOT NULL DEFAULT -1,
+  refresh_misses INTEGER NOT NULL DEFAULT 0,
   hidden INTEGER NOT NULL DEFAULT 0,
   ai_summary TEXT,
   ai_topic TEXT,
@@ -66,9 +67,18 @@ export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
   db.exec(SCHEMA);
+  migrate(db);
   // A crash mid-job leaves "running" rows behind; they can never finish.
   db.prepare("UPDATE job_runs SET status = 'error', detail = 'Bị dừng do khởi động lại' WHERE status = 'running'").run();
   return db;
+}
+
+/** Adds columns introduced after the first release to databases created before them. */
+function migrate(db: DatabaseSync): void {
+  const columns = db.prepare("PRAGMA table_info(posts)").all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === "refresh_misses")) {
+    db.exec("ALTER TABLE posts ADD COLUMN refresh_misses INTEGER NOT NULL DEFAULT 0");
+  }
 }
 
 /** Runs fn inside a transaction; rolls back on error. */

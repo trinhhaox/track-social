@@ -5,10 +5,11 @@ import { csrf } from "hono/csrf";
 import { secureHeaders } from "hono/secure-headers";
 import { isAiConfigured } from "../analysis/ai-post-scorer.ts";
 import { computeCampaignStats } from "../analysis/campaign-stats.ts";
-import { rankPosts, type RankedPost } from "../analysis/ranking.ts";
+import { authorKey, bestPostPerAuthor, engagementOf, isRankable, rankPosts, type RankedPost } from "../analysis/ranking.ts";
 import { isFanpageConfigured } from "../collectors/fanpage-graph-collector.ts";
 import { canonicalPostUrl, isFacebookUrl } from "../collectors/normalize-apify-items.ts";
 import type { AppConfig } from "../config.ts";
+import type { StoredPost } from "../domain-types.ts";
 import { addManualPost, listPosts, setHidden } from "../db/posts-repository.ts";
 import type { JobRunner } from "../jobs/job-runner.ts";
 import { JOB_LABELS, JOB_NAMES, enqueueJob, type JobName } from "../jobs/scheduler.ts";
@@ -16,11 +17,18 @@ import { buildPostsCsv } from "./csv-export.ts";
 import { AdminPage } from "./views/admin-page.tsx";
 import { LeaderboardPage } from "./views/leaderboard-page.tsx";
 
-/** Visible posts ranked, followed by hidden posts (unranked) for the admin view. */
+/** Public standings: one spot per author, held by their best rankable post. */
+function rankPublic(posts: StoredPost[], config: AppConfig): RankedPost[] {
+  return rankPosts(bestPostPerAuthor(posts.filter((p) => isRankable(p, config)), config.RANK_WEIGHTS), config.RANK_WEIGHTS);
+}
+
+/** Ranked posts, followed by unranked ones (hidden, excluded, or an author's weaker posts; rank 0) for the admin view. */
 function rankForAdmin(db: DatabaseSync, config: AppConfig): RankedPost[] {
   const all = listPosts(db, { includeHidden: true });
-  const hidden = all.filter((p) => p.hidden).map((post) => ({ post, engagement: 0, score: 0, rank: 0 }));
-  return [...rankPosts(all.filter((p) => !p.hidden), config.RANK_WEIGHTS), ...hidden];
+  const ranked = rankPublic(all, config);
+  const rankedIds = new Set(ranked.map((r) => r.post.id));
+  const unranked = rankPosts(all.filter((p) => !rankedIds.has(p.id)), config.RANK_WEIGHTS).map((r) => ({ ...r, rank: 0 }));
+  return [...ranked, ...unranked];
 }
 
 const redirectWithFlash = (message: string): Response =>
@@ -55,13 +63,14 @@ export function createApp(db: DatabaseSync, config: AppConfig, runner: JobRunner
   app.get("/healthz", (c) => c.json({ ok: true }));
 
   app.get("/", (c) => {
-    const posts = listPosts(db, { includeHidden: false });
-    const ranked = rankPosts(posts, config.RANK_WEIGHTS);
+    // Totals cover every eligible post; the table shows one (best) post per author.
+    const posts = listPosts(db, { includeHidden: false }).filter((p) => isRankable(p, config));
+    const ranked = rankPublic(posts, config);
     const updatedAt = posts.reduce<string | null>((max, p) => (p.metrics_updated_at && (!max || p.metrics_updated_at > max) ? p.metrics_updated_at : max), null);
     const totals = {
       posts: posts.length,
-      authors: new Set(posts.map((p) => p.author_id ?? p.author_url ?? p.author_name ?? p.id)).size,
-      engagement: ranked.reduce((a, r) => a + r.engagement, 0),
+      authors: new Set(posts.map(authorKey)).size,
+      engagement: posts.reduce((a, p) => a + engagementOf(p), 0),
     };
     c.header("Cache-Control", "public, max-age=60");
     return c.html(<LeaderboardPage config={config} ranked={ranked} totals={totals} updatedAt={updatedAt} />);

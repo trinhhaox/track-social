@@ -20,9 +20,17 @@ Bình luận lấy bằng `apify/facebook-comments-scraper`; Fanpage dùng Graph
 ## Chi phí ước tính (dưới 500 bài)
 
 - Quét hashtag: 0,005 USD/bài × số lần quét. Lần quét hằng ngày đã cập nhật luôn số liệu của các bài tìm thấy.
-- Làm mới số liệu: chỉ áp dụng cho bài không xuất hiện trong lần quét gần nhất (link thủ công, bài cũ).
-- Bình luận: 0,0025 USD/bình luận. Chỉ tải lại khi số bình luận của bài tăng.
+- Làm mới số liệu: chỉ áp dụng cho bài không xuất hiện trong lần quét gần nhất (link thủ công, bài cũ). Bài 3 lần liên tiếp không lấy được (bị xoá, riêng tư, link sai) sẽ ngừng làm mới và có nhãn "Không truy cập được" trong `/admin`.
+- Bình luận: 0,0025 USD/bình luận. Chỉ tải lại khi số bình luận tăng ít nhất 20% so với lần tải trước (bài ít bình luận: tăng 1 là tải). Bình luận Fanpage miễn phí nên tải lại mỗi khi tăng.
+- Bài vừa có trên Fanpage vừa được quét hashtag được gộp thành một dòng và chuyển sang làm mới miễn phí qua Graph API.
 - AI: mỗi bài chấm một lần, chỉ chấm lại khi nội dung bài thay đổi.
+
+## Lưu ý về số liệu
+
+- Số cảm xúc/bình luận/chia sẻ **chỉ tăng, không giảm**: mỗi lần cập nhật giữ giá trị lớn hơn giữa số cũ và số mới. Lý do: máy quét hashtag trả số làm tròn ("1,2K") còn lần làm mới trả số chính xác, và đôi khi trả 0 do lỗi tạm thời. Đổi lại, tương tác bị Facebook gỡ (like ảo) sẽ không được trừ; số sai cần sửa trực tiếp trong DB.
+- **Mỗi tác giả chỉ có 1 chỗ trên bảng xếp hạng**, tính bài có điểm cao nhất. Các bài còn lại vẫn được thu thập, cộng vào tổng số liệu và hiện trong `/admin` với nhãn **Bài phụ của tác giả**. Tác giả được nhận diện theo ID hồ sơ, rồi link hồ sơ, rồi tên.
+- `/admin` gắn nhãn để giám khảo xem lại: **Lạc đề?** (AI đánh giá), **Ngoài thời gian**, **Thiếu hashtag** (thường gặp với link thêm thủ công), **Không truy cập được**. Bật `AI_EXCLUDE_OFF_TOPIC=true` để bài lạc đề tự rời bảng xếp hạng công khai.
+- "Người bình luận duy nhất" chỉ tính bình luận cấp 1 (không tính trả lời), giống nhau cho Fanpage và trang cá nhân.
 
 ## Chạy local
 
@@ -40,7 +48,14 @@ Lưu ý: trong `.env`, viết `CAMPAIGN_HASHTAGS=trigxanh` (không có `#`), vì
 docker compose up -d --build   # lắng nghe 127.0.0.1:3017, dữ liệu trong volume campaign-data
 ```
 
-Sao lưu: `docker compose cp app:/app/data/campaign.db ./backup.db`. Đặt Nginx/Caddy phía trước để có HTTPS. Trang `/admin` dùng Basic Auth, nên **bắt buộc chạy qua HTTPS**.
+Sao lưu: `docker compose cp app:/app/data/campaign.db ./backup.db`. Đặt Nginx/Caddy phía trước để có HTTPS. Trang `/admin` dùng Basic Auth, nên **bắt buộc chạy qua HTTPS** và nên giới hạn số lần thử mật khẩu ở reverse proxy (ứng dụng không tự chặn dò mật khẩu), ví dụ Nginx:
+
+```nginx
+limit_req_zone $binary_remote_addr zone=admin:1m rate=10r/m;   # trong khối http
+location /admin { limit_req zone=admin burst=20 nodelay; proxy_pass http://127.0.0.1:3017; proxy_set_header Host $host; }
+```
+
+Khi dừng/deploy, các lượt chạy Apify đang dở sẽ bị huỷ (kết quả của chúng không còn ai nhận), nên tránh deploy lúc đang quét hashtag.
 
 ## Lịch chạy tự động
 

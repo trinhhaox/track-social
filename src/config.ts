@@ -69,6 +69,11 @@ const envSchema = z.object({
     ),
 
   RANK_WEIGHTS: weightsSchema,
+  /** Leave posts the AI judged off-topic out of the public leaderboard (admins still see them). */
+  AI_EXCLUDE_OFF_TOPIC: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
   LEADERBOARD_SIZE: z.coerce.number().int().positive().default(50),
 
   SCHEDULER_ENABLED: z

@@ -127,7 +127,7 @@ export function AdminPage({ config, stats, ranked, runs, pendingJobs, flash, int
 
       <section class="card">
         <h2>Tất cả bài viết</h2>
-        <AdminPostsTable ranked={ranked} />
+        <AdminPostsTable ranked={ranked} config={config} />
       </section>
     </Layout>
   );

@@ -13,6 +13,10 @@ describe("toCount", () => {
     assert.equal(toCount(undefined, null, "abc"), 0);
     assert.equal(toCount(-5), 0);
     assert.equal(toCount(undefined, "7"), 7);
+    // A zero in one field must not hide the real value in another.
+    assert.equal(toCount(0, 50), 50);
+    assert.equal(toCount("0", "1,2K"), 1200);
+    assert.equal(toCount(0, undefined), 0);
   });
 });
 

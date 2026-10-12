@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { computeCampaignStats, contiguousDays } from "../src/analysis/campaign-stats.ts";
-import { rankPosts, scorePost } from "../src/analysis/ranking.ts";
+import { bestPostPerAuthor, isRankable, rankPosts, scorePost } from "../src/analysis/ranking.ts";
 import { loadConfig } from "../src/config.ts";
 import { openDatabase } from "../src/db/database.ts";
 import {
-  addManualPost, listPosts, listPostsNeedingComments, markAiDeclined, replaceComments, setHidden, upsertPost,
+  MAX_REFRESH_MISSES, addManualPost, listPosts, listPostsNeedingComments, listStalePosts, markAiDeclined,
+  markRefreshMiss, upsertComments, setHidden, upsertPost,
 } from "../src/db/posts-repository.ts";
+import { barePostId } from "../src/collectors/fanpage-graph-collector.ts";
 import { runWithConcurrency } from "../src/jobs/run-with-concurrency.ts";
 import type { CollectedPost, StoredPost } from "../src/domain-types.ts";
 import { isInCampaignWindow } from "../src/jobs/campaign-jobs.ts";
@@ -99,19 +101,72 @@ describe("posts repository", () => {
     const db = openDatabase(":memory:");
     const id = upsertPost(db, post(), "hashtag");
     assert.equal(listPostsNeedingComments(db).length, 1);
-    replaceComments(db, id, [], 2);
+    upsertComments(db, id, [], 2);
     assert.equal(listPostsNeedingComments(db).length, 0);
     upsertPost(db, post({ comments: 5 }), "hashtag");
     assert.equal(listPostsNeedingComments(db).length, 1);
+  });
+
+  it("re-downloads Apify comments of busy posts only after 20% growth", () => {
+    const db = openDatabase(":memory:");
+    const id = upsertPost(db, post({ comments: 300 }), "hashtag");
+    upsertComments(db, id, [], 300);
+    upsertPost(db, post({ comments: 359 }), "hashtag");
+    assert.equal(listPostsNeedingComments(db).length, 0);
+    upsertPost(db, post({ comments: 360 }), "hashtag");
+    assert.equal(listPostsNeedingComments(db).length, 1);
+  });
+
+  it("always re-downloads free Fanpage comments when the count grew", () => {
+    const db = openDatabase(":memory:");
+    const id = upsertPost(db, post({ comments: 300 }), "fanpage");
+    upsertComments(db, id, [], 300);
+    upsertPost(db, post({ comments: 301 }), "fanpage");
+    assert.equal(listPostsNeedingComments(db).length, 1);
+  });
+
+  it("stops refreshing a post after repeated empty refreshes, resets on success", () => {
+    const db = openDatabase(":memory:");
+    const { id } = addManualPost(db, "https://www.facebook.com/x/posts/9");
+    const future = "2999-01-01T00:00:00.000Z";
+    for (let i = 0; i < MAX_REFRESH_MISSES; i++) {
+      assert.equal(listStalePosts(db, future).length, 1);
+      markRefreshMiss(db, id);
+    }
+    assert.equal(listStalePosts(db, future).length, 0);
+    upsertPost(db, post({ fbPostId: "9", url: "https://www.facebook.com/x/posts/9" }), "manual", id);
+    assert.equal(listStalePosts(db, future).length, 1);
+  });
+
+  it("maps a post found by both hashtag scan and Fanpage to one row", () => {
+    const db = openDatabase(":memory:");
+    upsertPost(db, post({ fbPostId: "555", url: "https://www.facebook.com/page/posts/555" }), "hashtag");
+    upsertPost(db, post({ fbPostId: barePostId("123_555"), url: "https://www.facebook.com/page/posts/555?ref=x", reactions: 20 }), "fanpage");
+    const rows = listPosts(db, { includeHidden: true });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.source, "fanpage");
+    assert.equal(rows[0]?.reactions, 20);
   });
 });
 
 describe("ranking", () => {
   const stored = (id: number, r: number, c: number, s: number, ai: number | null = null): StoredPost => ({
     id, fb_post_id: String(id), url: `u${id}`, source: "hashtag", author_id: `a${id}`, author_name: null, author_url: null,
-    text: null, posted_at: `2026-10-0${id}T00:00:00Z`, reactions: r, comments: c, shares: s, comments_fetched_count: -1,
+    text: null, posted_at: `2026-10-0${id}T00:00:00Z`, reactions: r, comments: c, shares: s, comments_fetched_count: -1, refresh_misses: 0,
     hidden: 0, ai_summary: null, ai_topic: null, ai_sentiment: null, ai_on_topic: null, ai_score: ai, ai_reason: null,
     ai_scored_text_hash: null, first_seen_at: "2026-10-01T00:00:00Z", metrics_updated_at: null,
+  });
+
+  it("keeps only each author's best post", () => {
+    const sameAuthor = (s: StoredPost): StoredPost => ({ ...s, author_id: "same" });
+    const posts = [sameAuthor(stored(1, 3, 0, 0)), sameAuthor(stored(2, 9, 0, 0)), stored(3, 5, 0, 0), stored(4, 1, 0, 0)];
+    const ranked = rankPosts(bestPostPerAuthor(posts, config.RANK_WEIGHTS), config.RANK_WEIGHTS);
+    assert.deepEqual(ranked.map((r) => [r.post.id, r.rank]), [[2, 1], [3, 2], [4, 3]]);
+  });
+
+  it("treats posts without any author identity as different authors", () => {
+    const anon = (s: StoredPost): StoredPost => ({ ...s, author_id: null });
+    assert.equal(bestPostPerAuthor([anon(stored(1, 1, 0, 0)), anon(stored(2, 2, 0, 0))], config.RANK_WEIGHTS).length, 2);
   });
 
   it("weights metrics and AI score", () => {
@@ -124,14 +179,28 @@ describe("ranking", () => {
   });
 });
 
+describe("off-topic exclusion", () => {
+  it("keeps AI off-topic posts ranked unless AI_EXCLUDE_OFF_TOPIC is on", () => {
+    const db = openDatabase(":memory:");
+    const id = upsertPost(db, post(), "hashtag");
+    markAiDeclined(db, id, "h");
+    db.prepare("UPDATE posts SET ai_on_topic = 0 WHERE id = ?").run(id);
+    const stored = listPosts(db, { includeHidden: true })[0] as StoredPost;
+    assert.equal(isRankable(stored, config), true);
+    assert.equal(isRankable(stored, loadConfig({ ...baseEnv, AI_EXCLUDE_OFF_TOPIC: "true" })), false);
+    setHidden(db, id, true);
+    assert.equal(isRankable(listPosts(db, { includeHidden: true })[0] as StoredPost, config), false);
+  });
+});
+
 describe("campaign stats", () => {
   it("counts unique commenters across posts and builds daily series", () => {
     const db = openDatabase(":memory:");
     const a = upsertPost(db, post(), "hashtag");
     const b = upsertPost(db, post({ fbPostId: "2", url: "https://www.facebook.com/b/posts/2", authorId: "u2" }), "hashtag");
     const comment = (id: string, key: string) => ({ commentId: id, profileKey: key, profileName: null, profileUrl: null, text: null, commentedAt: null });
-    replaceComments(db, a, [comment("c1", "id:x"), comment("c2", "id:y")], 2);
-    replaceComments(db, b, [comment("c3", "id:x")], 1);
+    upsertComments(db, a, [comment("c1", "id:x"), comment("c2", "id:y")], 2);
+    upsertComments(db, b, [comment("c3", "id:x")], 1);
     const stats = computeCampaignStats(db, listPosts(db, { includeHidden: false }));
     assert.equal(stats.uniqueCommenters, 2);
     assert.equal(stats.totalAuthors, 2);

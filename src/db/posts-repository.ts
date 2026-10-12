@@ -4,6 +4,15 @@ import { inTransaction } from "./database.ts";
 
 const nowIso = (): string => new Date().toISOString();
 
+/** After this many empty refreshes in a row a post is treated as gone (deleted/private) and no longer billed. */
+export const MAX_REFRESH_MISSES = 3;
+
+/**
+ * Apify comment downloads are billed per comment, so a post is re-downloaded only after its
+ * comment count grew by this fraction (or by at least 1 for small posts). Fanpage reads are free.
+ */
+const COMMENT_REFETCH_GROWTH = 0.2;
+
 function getById(db: DatabaseSync, id: number): StoredPost | undefined {
   return db.prepare("SELECT * FROM posts WHERE id = ?").get(id) as unknown as StoredPost | undefined;
 }
@@ -48,12 +57,16 @@ export function upsertPost(db: DatabaseSync, post: CollectedPost, source: PostSo
            fb_post_id = COALESCE(fb_post_id, ?), author_id = COALESCE(?, author_id),
            author_name = COALESCE(?, author_name), author_url = COALESCE(?, author_url),
            text = COALESCE(?, text), posted_at = COALESCE(?, posted_at),
+           -- Monotonic on purpose: rounded "1,2K" scan values and transient zeros must not lower
+           -- exact counts. Trade-off: genuine drops (removed fake likes) are never reflected.
            reactions = MAX(reactions, ?), comments = MAX(comments, ?), shares = MAX(shares, ?),
-           metrics_updated_at = ?
+           metrics_updated_at = ?, refresh_misses = 0,
+           -- A post the Fanpage also returns is refreshed for free via Graph API from now on.
+           source = CASE WHEN ? = 'fanpage' THEN 'fanpage' ELSE source END
          WHERE id = ?`,
       ).run(
         post.fbPostId, post.authorId, post.authorName, post.authorUrl, post.text, post.postedAt,
-        post.reactions, post.comments, post.shares, now, id,
+        post.reactions, post.comments, post.shares, now, source, id,
       );
     } else {
       const result = db.prepare(
@@ -85,7 +98,8 @@ export function addManualPost(db: DatabaseSync, url: string): { id: number; crea
   return { id: Number(result.lastInsertRowid), created: true };
 }
 
-export function replaceComments(db: DatabaseSync, postId: number, comments: CollectedComment[], fetchedCount: number): void {
+/** Adds newly downloaded comments (comments no longer on Facebook are kept) and records the count fetched. */
+export function upsertComments(db: DatabaseSync, postId: number, comments: CollectedComment[], fetchedCount: number): void {
   inTransaction(db, () => {
     const insert = db.prepare(
       `INSERT INTO comments (comment_id, post_id, profile_key, profile_name, profile_url, text, commented_at)
@@ -123,18 +137,26 @@ export function listPosts(db: DatabaseSync, opts: { includeHidden: boolean }): S
   return db.prepare(`SELECT * FROM posts ${where} ORDER BY id`).all() as unknown as StoredPost[];
 }
 
-/** Posts whose metrics are older than `olderThanIso` (or never fetched). */
+/** Posts whose metrics are older than `olderThanIso` (or never fetched), skipping posts that look gone. */
 export function listStalePosts(db: DatabaseSync, olderThanIso: string): StoredPost[] {
   return db.prepare(
-    "SELECT * FROM posts WHERE hidden = 0 AND (metrics_updated_at IS NULL OR metrics_updated_at < ?) ORDER BY id",
-  ).all(olderThanIso) as unknown as StoredPost[];
+    `SELECT * FROM posts WHERE hidden = 0 AND refresh_misses < ?
+       AND (metrics_updated_at IS NULL OR metrics_updated_at < ?) ORDER BY id`,
+  ).all(MAX_REFRESH_MISSES, olderThanIso) as unknown as StoredPost[];
 }
 
-/** Posts that gained comments since their comments were last downloaded. */
+/** Records a refresh that returned nothing for this post. */
+export function markRefreshMiss(db: DatabaseSync, postId: number): void {
+  db.prepare("UPDATE posts SET refresh_misses = refresh_misses + 1 WHERE id = ?").run(postId);
+}
+
+/** Posts whose comment count grew enough since their comments were last downloaded. */
 export function listPostsNeedingComments(db: DatabaseSync): StoredPost[] {
   return db.prepare(
-    "SELECT * FROM posts WHERE hidden = 0 AND comments > 0 AND comments > comments_fetched_count ORDER BY id",
-  ).all() as unknown as StoredPost[];
+    `SELECT * FROM posts WHERE hidden = 0 AND comments > 0 AND comments > comments_fetched_count
+       AND (source = 'fanpage' OR comments - comments_fetched_count >= MAX(1, comments_fetched_count * ?))
+     ORDER BY id`,
+  ).all(COMMENT_REFETCH_GROWTH) as unknown as StoredPost[];
 }
 
 export function queryAll<T>(db: DatabaseSync, sql: string, ...params: SQLInputValue[]): T[] {

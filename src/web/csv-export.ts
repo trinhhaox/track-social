@@ -15,7 +15,7 @@ const HEADERS = [
 
 export function buildPostsCsv(ranked: RankedPost[]): string {
   const rows = ranked.map(({ post, score, rank }) => [
-    post.hidden ? "" : rank, score, post.author_name, post.author_url, post.url, post.source, post.posted_at,
+    rank || "", score, post.author_name, post.author_url, post.url, post.source, post.posted_at,
     post.reactions, post.comments, post.shares, post.ai_score,
     post.ai_on_topic === null ? "" : post.ai_on_topic ? "có" : "không",
     post.ai_topic, post.ai_sentiment, post.ai_summary, post.ai_reason, post.hidden ? "có" : "", post.text,

@@ -5,7 +5,8 @@ import { fetchCommentsForUrl, fetchPostsByUrl, scanHashtagPosts } from "../colle
 import { fetchFanpageComments, fetchFanpagePosts, isFanpageConfigured } from "../collectors/fanpage-graph-collector.ts";
 import { canonicalPostUrl } from "../collectors/normalize-apify-items.ts";
 import {
-  listPosts, listPostsNeedingComments, listStalePosts, markAiDeclined, replaceComments, saveAiAssessment, upsertPost,
+  listPosts, listPostsNeedingComments, listStalePosts, markAiDeclined, markRefreshMiss, upsertComments,
+  saveAiAssessment, upsertPost,
 } from "../db/posts-repository.ts";
 import type { CollectedPost, StoredPost } from "../domain-types.ts";
 import { runWithConcurrency } from "./run-with-concurrency.ts";
@@ -58,15 +59,25 @@ export async function refreshStaleMetrics(db: DatabaseSync, config: AppConfig): 
   if (stale.length === 0) return [...notes, "Không có bài cần làm mới"].join(". ");
 
   let updated = 0;
-  await fetchPostsByUrl(config, stale.map((p) => p.url), (byInputUrl) => {
-    for (const post of stale) {
-      const fresh = byInputUrl.get(canonicalPostUrl(post.url));
-      if (!fresh) continue;
-      upsertPost(db, { ...fresh, url: post.url }, post.source, post.id);
-      updated++;
+  let missed = 0;
+  const byUrl = new Map(stale.map((p) => [p.url, p]));
+  await fetchPostsByUrl(config, [...byUrl.keys()], (byInputUrl, requestedUrls) => {
+    for (const url of requestedUrls) {
+      const post = byUrl.get(url);
+      if (!post) continue;
+      const fresh = byInputUrl.get(canonicalPostUrl(url));
+      if (fresh) {
+        upsertPost(db, { ...fresh, url }, post.source, post.id);
+        updated++;
+      } else {
+        // Deleted/private posts return nothing; count misses so they stop being billed.
+        markRefreshMiss(db, post.id);
+        missed++;
+      }
     }
   });
-  return [...notes, `Làm mới ${updated}/${stale.length} bài`].join(". ");
+  const missedNote = missed ? `, ${missed} bài không lấy được` : "";
+  return [...notes, `Làm mới ${updated}/${stale.length} bài${missedNote}`].join(". ");
 }
 
 /** Downloads comments only for posts whose comment count grew since the last download. */
@@ -87,7 +98,7 @@ export async function refreshComments(db: DatabaseSync, config: AppConfig): Prom
       empty++;
       return;
     }
-    replaceComments(db, post.id, comments, post.comments);
+    upsertComments(db, post.id, comments, post.comments);
     saved += comments.length;
   });
   const emptyNote = empty ? `, ${empty} bài chưa lấy được (sẽ thử lại)` : "";

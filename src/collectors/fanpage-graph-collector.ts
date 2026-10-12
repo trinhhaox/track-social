@@ -4,7 +4,7 @@
  */
 import type { AppConfig } from "../config.ts";
 import type { CollectedComment, CollectedPost } from "../domain-types.ts";
-import { commenterKey, containsHashtag } from "./normalize-apify-items.ts";
+import { canonicalPostUrl, commenterKey, containsHashtag } from "./normalize-apify-items.ts";
 
 const MAX_PAGES = 50;
 
@@ -30,6 +30,15 @@ interface GraphPage<T> {
   data: T[];
   paging?: { next?: string };
 }
+
+/**
+ * Graph ids look like "{pageId}_{postId}" while Apify reports the bare post id. Storing the
+ * bare id lets a post found by both the hashtag scan and the Fanpage sync map to one row.
+ */
+export const barePostId = (graphId: string): string => graphId.slice(graphId.indexOf("_") + 1);
+
+const graphPostId = (pageId: string, fbPostId: string): string =>
+  fbPostId.includes("_") ? fbPostId : `${pageId}_${fbPostId}`;
 
 function credentials(config: AppConfig): { pageId: string; token: string } | null {
   if (!config.FB_PAGE_ID || !config.FB_PAGE_TOKEN) return null;
@@ -75,8 +84,8 @@ export async function fetchFanpagePosts(config: AppConfig): Promise<CollectedPos
   return posts
     .filter((p) => containsHashtag(p.message ?? null, config.CAMPAIGN_HASHTAGS))
     .map((p) => ({
-      fbPostId: p.id,
-      url: p.permalink_url ?? `https://www.facebook.com/${p.id}`,
+      fbPostId: barePostId(p.id),
+      url: canonicalPostUrl(p.permalink_url ?? `https://www.facebook.com/${p.id}`),
       authorId: p.from?.id ?? null,
       authorName: p.from?.name ?? null,
       authorUrl: p.from ? `https://www.facebook.com/${p.from.id}` : null,
@@ -91,8 +100,11 @@ export async function fetchFanpagePosts(config: AppConfig): Promise<CollectedPos
 export async function fetchFanpageComments(config: AppConfig, fbPostId: string): Promise<CollectedComment[]> {
   const creds = credentials(config);
   if (!creds) return [];
-  const params = new URLSearchParams({ fields: "id,message,created_time,from", filter: "stream", limit: "100" });
-  const url = `https://graph.facebook.com/${config.FB_GRAPH_VERSION}/${encodeURIComponent(fbPostId)}/comments?${params}`;
+  // Top-level only, matching the Apify comments run (includeNestedComments: false), so
+  // "unique commenters" means the same thing for Fanpage and personal-profile posts.
+  const params = new URLSearchParams({ fields: "id,message,created_time,from", filter: "toplevel", limit: "100" });
+  const postId = graphPostId(creds.pageId, fbPostId);
+  const url = `https://graph.facebook.com/${config.FB_GRAPH_VERSION}/${encodeURIComponent(postId)}/comments?${params}`;
   const comments = await graphGetAll<GraphComment>(url, creds.token);
   return comments.flatMap((c) => {
     const key = commenterKey(null, c.from?.id ?? null, c.from?.name ?? null);

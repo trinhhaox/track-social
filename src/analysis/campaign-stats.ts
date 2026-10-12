@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { queryAll } from "../db/posts-repository.ts";
 import type { StoredPost } from "../domain-types.ts";
-import { engagementOf } from "./ranking.ts";
+import { authorKey, engagementOf } from "./ranking.ts";
 
 export interface DailyPoint {
   day: string;
@@ -36,7 +36,6 @@ const dayFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: TIMEZONE, year
 /** Calendar day (YYYY-MM-DD) in Vietnam time. */
 export const toLocalDay = (iso: string): string => dayFormatter.format(new Date(iso));
 
-const authorKey = (p: StoredPost): string => p.author_id ?? p.author_url ?? p.author_name ?? `post:${p.id}`;
 
 /** Every calendar day from the earliest to the latest given day, so charts have no gaps. */
 export function contiguousDays(days: string[]): string[] {

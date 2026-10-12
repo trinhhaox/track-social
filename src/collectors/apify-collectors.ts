@@ -28,13 +28,13 @@ export async function scanHashtagPosts(config: AppConfig): Promise<CollectedPost
 
 /**
  * Re-reads metrics for known post URLs. Each finished batch is handed to `onBatch`
- * (keyed by canonical input URL) right away, so a later failing batch does not
- * discard results that were already paid for.
+ * (results keyed by canonical input URL, plus the URLs that were requested) right away,
+ * so a later failing batch does not discard results that were already paid for.
  */
 export async function fetchPostsByUrl(
   config: AppConfig,
   urls: string[],
-  onBatch: (byInputUrl: Map<string, CollectedPost>) => void,
+  onBatch: (byInputUrl: Map<string, CollectedPost>, requestedUrls: string[]) => void,
 ): Promise<void> {
   const token = requireToken(config);
   for (const batch of chunk(urls, URL_BATCH_SIZE)) {
@@ -48,7 +48,7 @@ export async function fetchPostsByUrl(
       const inputUrl = (item as { inputUrl?: unknown }).inputUrl;
       if (post && typeof inputUrl === "string") byInputUrl.set(canonicalPostUrl(inputUrl), post);
     }
-    onBatch(byInputUrl);
+    onBatch(byInputUrl, batch);
   }
 }
 

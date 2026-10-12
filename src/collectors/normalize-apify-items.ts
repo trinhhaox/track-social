@@ -16,20 +16,29 @@ function str(...values: unknown[]): string | null {
   return null;
 }
 
-/** Accepts numbers and numeric strings such as "1,2K" or "3.4M" as Facebook renders them. */
+/** Parses one count: numbers and numeric strings such as "1,2K" or "3.4M" as Facebook renders them. */
+function parseCount(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, Math.round(v));
+  if (typeof v !== "string" || !v.trim()) return null;
+  const match = v.trim().replace(/\s/g, "").match(/^([\d.,]+)([KkMm])?$/);
+  if (!match?.[1]) return null;
+  const unit = match[2]?.toLowerCase();
+  // "1,2K" (vi) and "1.2K" (en) are decimals; "1,234" without unit is thousands.
+  const numeric = unit ? Number(match[1].replace(",", ".")) : Number(match[1].replace(/[.,]/g, ""));
+  if (!Number.isFinite(numeric)) return null;
+  const multiplier = unit === "k" ? 1_000 : unit === "m" ? 1_000_000 : 1;
+  return Math.round(numeric * multiplier);
+}
+
+/**
+ * First positive count among several candidate fields. Actors sometimes fill one field with 0
+ * and the real value in another (e.g. reactionsCount: 0, likes: 50), so a 0 only wins when no
+ * field has a positive value.
+ */
 export function toCount(...values: unknown[]): number {
   for (const v of values) {
-    if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, Math.round(v));
-    if (typeof v === "string" && v.trim()) {
-      const match = v.trim().replace(/\s/g, "").match(/^([\d.,]+)([KkMm])?$/);
-      if (!match?.[1]) continue;
-      const unit = match[2]?.toLowerCase();
-      // "1,2K" (vi) and "1.2K" (en) are decimals; "1,234" without unit is thousands.
-      const numeric = unit ? Number(match[1].replace(",", ".")) : Number(match[1].replace(/[.,]/g, ""));
-      if (!Number.isFinite(numeric)) continue;
-      const multiplier = unit === "k" ? 1_000 : unit === "m" ? 1_000_000 : 1;
-      return Math.round(numeric * multiplier);
-    }
+    const count = parseCount(v);
+    if (count !== null && count > 0) return count;
   }
   return 0;
 }

@@ -53,7 +53,7 @@ export function startScheduler(runner: JobRunner, db: DatabaseSync, config: AppC
     comments: config.REFRESH_INTERVAL_HOURS,
     ai: config.SCAN_INTERVAL_HOURS,
   };
-  setTimeout(() => {
+  const bootTimer = setTimeout(() => {
     const overdue = JOB_NAMES.filter((job) => {
       const last = runner.lastSuccessAt(job);
       return !last || Date.now() - new Date(last).getTime() > intervalHours[job] * 3_600_000;
@@ -63,5 +63,6 @@ export function startScheduler(runner: JobRunner, db: DatabaseSync, config: AppC
   return () => {
     clearInterval(scanTimer);
     clearInterval(refreshTimer);
+    clearTimeout(bootTimer);
   };
 }
