@@ -1,4 +1,4 @@
-# FB Hashtag Campaign Tracker
+# Track Social
 
 Công cụ thu thập bài viết Facebook gắn hashtag của chiến dịch, đo lượt tương tác, cho AI chấm bài và hiển thị bảng xếp hạng công khai.
 
