@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /app/data/campaign.db
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:3017:3000"
+    volumes:
+      # Named volume inherits /app/data ownership (user node) from the image.
+      - campaign-data:/app/data
+
+volumes:
+  campaign-data:
